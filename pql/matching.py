@@ -19,14 +19,13 @@ currently unsupported:
 2. geospatial
 """
 import ast
+import datetime
 import re
+from calendar import timegm
 
 import astor
 import bson
-import datetime
 import dateutil.parser
-from calendar import timegm
-
 from astor.source_repr import split_lines
 
 from axonius.consts.system_consts import MULTI_COMPARE_MAGIC_STRING, COMPARE_MAGIC_STRING
@@ -48,11 +47,14 @@ def parse_date_custom(str_date: str) -> datetime:
     prefix_for_timedelta = int(delimiter_sign + '1')
 
     if timedelta_indicator == 'h':
-        first_date += prefix_for_timedelta * datetime.timedelta(hours=number_for_timedelta)
+        first_date += prefix_for_timedelta * \
+            datetime.timedelta(hours=number_for_timedelta)
     elif timedelta_indicator == 'd':
-        first_date += prefix_for_timedelta * datetime.timedelta(days=number_for_timedelta)
+        first_date += prefix_for_timedelta * \
+            datetime.timedelta(days=number_for_timedelta)
     elif timedelta_indicator == 'w':
-        first_date += prefix_for_timedelta * datetime.timedelta(weeks=number_for_timedelta)
+        first_date += prefix_for_timedelta * \
+            datetime.timedelta(weeks=number_for_timedelta)
 
     return first_date
 
@@ -64,13 +66,15 @@ def parse_date(node):
         s = node.s
         if 'AXON' in s:
             return parse_date_custom(s[len('AXON'):])
+        if 'NOW' in s:
+            return s
         return dateutil.parser.parse(s)
     except Exception as e:
-        raise ParseError('Error parsing date: ' + str(e), col_offset=node.col_offset)
+        raise ParseError('Error parsing date: ' + str(e),
+                         col_offset=node.col_offset)
 
 
-class AstHandler(object):
-
+class BaseAstHandler(object):
     def get_options(self):
         return [f.replace('handle_', '') for f in dir(self) if f.startswith('handle_')]
 
@@ -81,9 +85,13 @@ class AstHandler(object):
         except AttributeError:
             raise ParseError(f'Unsupported syntax ({0}) on {self.__class__}.'.format(thing_name,
                                                                                      self.get_options()),
-                             col_offset=thing.col_offset if hasattr(thing, 'col_offset') else None,
+                             col_offset=thing.col_offset if hasattr(
+                                 thing, 'col_offset') else None,
                              options=self.get_options())
         return handler
+
+
+class AstHandler(BaseAstHandler):
 
     def handle(self, thing):
         return self.resolve(thing)(thing)
@@ -106,50 +114,14 @@ class ParseError(Exception):
         return self.message
 
 
-class Parser(AstHandler):
-    def __init__(self, operator_map):
-        self._operator_map = operator_map
+class BaseParser:
 
     def get_options(self):
         return self._operator_map.get_options()
 
-    def handle_Call(self, op):
-        if op.func.id != 'search':
-            raise ParseError(f'Unsupported method call {op.func.id}')
-        return {'$text': {'$search': f'\"{op.args[0].s}\"', '$caseSensitive': False}}
-
-    def handle_BoolOp(self, op):
-        return {self.handle(op.op): list(map(self.handle, op.values))}
-
-    def handle_And(self, op):
-        '''and'''
-        return '$and'
-
-    def handle_Or(self, op):
-        '''or'''
-        return '$or'
-
-    def handle_UnaryOp(self, op):
-        operator = self.handle(op.operand)
-        field, value = list(operator.items())[0]
-        return {field: {self.handle(op.op): value}}
-
     def handle_Not(self, not_node):
         '''not'''
         return '$not'
-
-    def handle_Compare(self, compare):
-        if len(compare.comparators) != 1:
-            raise ParseError('Invalid number of comparators: {0}'.format(len(compare.comparators)),
-                             col_offset=compare.comparators[1].col_offset)
-        try:
-            return self._operator_map.handle(left=compare.left,
-                                             operator=compare.ops[0],
-                                             right=compare.comparators[0])
-        except ParseError as err:
-            if err.message.startswith('Unsupported syntax'):
-                return self.handle_field_comparison(compare)
-            raise
 
     def handle_field_comparison(self, compare: ast.Compare) -> dict:
         """
@@ -166,16 +138,21 @@ class Parser(AstHandler):
             first_field = self.attribute2str(compare.left.left)
             second_field = self.attribute2str(compare.comparators[0])
             final_compare = compare.left.right.n
-            return {MULTI_COMPARE_MAGIC_STRING: {main_operator: final_compare, sub_operator: [first_field, second_field]}}
+            return {MULTI_COMPARE_MAGIC_STRING: {
+                main_operator: final_compare, sub_operator: [first_field, second_field]
+            }}
         if hasattr(compare.comparators[0], 'left'):
             # Its a date comparision with operator query (>Days)
             # Example Query: adapter1.last_seen > adapter2.last_seen + 1
             main_operator = str(compare.ops[0].__class__).split('.')[-1][:-2]
-            sub_operator = str(compare.comparators[0].op.__class__).split('.')[-1][:-2]
+            sub_operator = str(
+                compare.comparators[0].op.__class__).split('.')[-1][:-2]
             first_field = self.attribute2str(compare.left)
             second_field = self.attribute2str(compare.comparators[0].left)
             final_compare = compare.comparators[0].right.n
-            return {MULTI_COMPARE_MAGIC_STRING: {main_operator: final_compare, sub_operator: [first_field, second_field]}}
+            return {MULTI_COMPARE_MAGIC_STRING: {
+                main_operator: final_compare, sub_operator: [first_field, second_field]
+            }}
         # Regular Fields comparison
         first_field = self.attribute2str(compare.left)
         second_field = self.attribute2str(compare.comparators[0])
@@ -207,6 +184,45 @@ class Parser(AstHandler):
         return ".".join(v)
 
 
+class Parser(BaseParser, AstHandler):
+    def __init__(self, operator_map):
+        self._operator_map = operator_map
+
+    def handle_Call(self, op):
+        if op.func.id != 'search':
+            raise ParseError(f'Unsupported method call {op.func.id}')
+        return {'$text': {'$search': f'\"{op.args[0].s}\"', '$caseSensitive': False}}
+
+    def handle_BoolOp(self, op):
+        return {self.handle(op.op): list(map(self.handle, op.values))}
+
+    def handle_And(self, op):
+        '''and'''
+        return '$and'
+
+    def handle_Or(self, op):
+        '''or'''
+        return '$or'
+
+    def handle_UnaryOp(self, op):
+        operator = self.handle(op.operand)
+        field, value = list(operator.items())[0]
+        return {field: {self.handle(op.op): value}}
+
+    def handle_Compare(self, compare):
+        if len(compare.comparators) != 1:
+            raise ParseError('Invalid number of comparators: {0}'.format(len(compare.comparators)),
+                             col_offset=compare.comparators[1].col_offset)
+        try:
+            return self._operator_map.handle(left=compare.left,
+                                             operator=compare.ops[0],
+                                             right=compare.comparators[0])
+        except ParseError as err:
+            if err.message.startswith('Unsupported syntax'):
+                return self.handle_field_comparison(compare)
+            raise
+
+
 class SchemaFreeParser(Parser):
     def __init__(self):
         super(SchemaFreeParser, self).__init__(SchemaFreeOperatorMap())
@@ -214,7 +230,8 @@ class SchemaFreeParser(Parser):
 
 class SchemaAwareParser(Parser):
     def __init__(self, *a, **k):
-        super(SchemaAwareParser, self).__init__(SchemaAwareOperatorMap(*a, **k))
+        super(SchemaAwareParser, self).__init__(
+            SchemaAwareOperatorMap(*a, **k))
 
 
 class FieldName(AstHandler):
@@ -262,11 +279,11 @@ class SchemaAwareOperatorMap(OperatorMap):
     def resolve_type(self, field):
         return self._field_to_type[field]
 
-#---Function-Handlers---#
+
+# ---Function-Handlers---#
 
 
-class Func(AstHandler):
-
+class BaseFunc:
     @staticmethod
     def get_arg(node, index):
         if index > len(node.args) - 1:
@@ -277,6 +294,12 @@ class Func(AstHandler):
     @staticmethod
     def parse_arg(node, index, field):
         return field.handle(Func.get_arg(node, index))
+
+    def handle_type(self, node):
+        return {'$type': self.parse_arg(node, 0, IntField())}
+
+
+class Func(BaseFunc, AstHandler):
 
     def handle(self, node):
         try:
@@ -289,9 +312,6 @@ class Func(AstHandler):
 
     def handle_exists(self, node):
         return {'$exists': self.parse_arg(node, 0, BoolField())}
-
-    def handle_type(self, node):
-        return {'$type': self.parse_arg(node, 0, IntField())}
 
 
 class StringFunc(Func):
@@ -344,20 +364,31 @@ class EpochUTCFunc(Func):
 class GeoShapeFuncParser(Func):
 
     def handle_Point(self, node):
-        return {'$geometry':
-                {'type': 'Point',
-                 'coordinates': [self.parse_arg(node, 0, IntField()),
-                                 self.parse_arg(node, 1, IntField())]}}
+        return {
+            '$geometry':
+                {
+                    'type': 'Point',
+                    'coordinates': [self.parse_arg(node, 0, IntField()), self.parse_arg(node, 1, IntField())]
+                }
+        }
 
     def handle_LineString(self, node):
-        return {'$geometry':
-                {'type': 'LineString',
-                 'coordinates': self.parse_arg(node, 0, ListField(ListField(IntField())))}}
+        return {
+            '$geometry':
+                {
+                    'type': 'LineString',
+                    'coordinates': self.parse_arg(node, 0, ListField(ListField(IntField())))
+                }
+        }
 
     def handle_Polygon(self, node):
-        return {'$geometry':
-                {'type': 'Polygon',
-                 'coordinates': self.parse_arg(node, 0, ListField(ListField(ListField(IntField()))))}}
+        return {
+            '$geometry':
+                {
+                    'type': 'Polygon',
+                    'coordinates': self.parse_arg(node, 0, ListField(ListField(ListField(IntField()))))
+                }
+        }
 
     def handle_box(self, node):
         return {'$box': self.parse_arg(node, 0, ListField(ListField(IntField())))}
@@ -390,7 +421,8 @@ class GeoShapeParser(AstHandler):
 class GeoFunc(Func):
     def _any_near(self, node, near_name):
         shape = GeoShapeParser().handle(self.get_arg(node, 0))
-        result = bson.SON({near_name: shape})  # use SON because mongo expects the command before the arguments
+        # use SON because mongo expects the command before the arguments
+        result = bson.SON({near_name: shape})
         if len(node.args) > 1:
             distance = self.parse_arg(node, 1, IntField())  # meters
             if isinstance(shape, list):  # legacy coordinate pair
@@ -416,16 +448,13 @@ class GenericFunc(StringFunc, IntFunc, ListFunc, DateTimeFunc,
                   IdFunc, EpochFunc, EpochUTCFunc, GeoFunc):
     pass
 
-#---Operators---#
+
+# ---Operators---#
 
 
-class Operator(AstHandler):
+class BaseOperator:
     def __init__(self, field):
         self.field = field
-
-    def handle_Eq(self, node):
-        '''=='''
-        return self.field.handle(node)
 
     def handle_NotEq(self, node):
         '''!='''
@@ -450,6 +479,13 @@ class Operator(AstHandler):
         return {'$nin': list(map(self.field.handle, elts))}
 
 
+class Operator(BaseOperator, AstHandler):
+
+    def handle_Eq(self, node):
+        '''=='''
+        return self.field.handle(node)
+
+
 class AlgebricOperator(Operator):
     def handle_Gt(self, node):
         '''>'''
@@ -467,10 +503,18 @@ class AlgebricOperator(Operator):
         '''<='''
         return {'$lte': self.field.handle(node)}
 
-#---Field-Types---#
+
+# ---Field-Types---#
+
+class BaseField:
+    SPECIAL_VALUES = {'None': None,
+                      'null': None}
+
+    def handle_operator_and_right(self, operator, right):
+        return self.OP_CLASS(self).resolve(operator)(right)
 
 
-class Field(AstHandler):
+class Field(BaseField, AstHandler):
     OP_CLASS = Operator
 
     SPECIAL_VALUES = {'None': None,
@@ -480,9 +524,10 @@ class Field(AstHandler):
         try:
             return self.SPECIAL_VALUES[node.id]
         except KeyError:
-            raise ParseError('Invalid name: {0}'.format(node.id), node.col_offset, options=list(self.SPECIAL_VALUES))
+            raise ParseError('Invalid name: {0}'.format(
+                node.id), node.col_offset, options=list(self.SPECIAL_VALUES))
 
-    def handle_operator_and_right(self, operator, right):
+    def handle_operator_with_right_and_left(self, operator, right):
         return self.OP_CLASS(self).resolve(operator)(right)
 
 
@@ -495,7 +540,7 @@ class AlgebricField(Field):
     OP_CLASS = AlgebricOperator
 
 
-class StringField(AlgebricField):
+class StringBaseField:
     def handle_Call(self, node):
         return StringFunc().handle(node)
 
@@ -503,15 +548,21 @@ class StringField(AlgebricField):
         return node.s
 
 
-class IntField(AlgebricField):
-    def handle_Num(self, node):
-        return node.n
+class StringField(StringBaseField, AlgebricField):
+    pass
 
+
+class IntBaseField:
     def handle_Call(self, node):
         return IntFunc().handle(node)
 
 
-class BoolField(Field):
+class IntField(IntBaseField, AlgebricField):
+    def handle_Num(self, node):
+        return node.n
+
+
+class BoolBaseField:
     SPECIAL_VALUES = dict(Field.SPECIAL_VALUES,
                           **{'False': False,
                              'True': True,
@@ -519,7 +570,11 @@ class BoolField(Field):
                              'true': True})
 
 
-class ListField(Field):
+class BoolField(BoolBaseField, Field):
+    pass
+
+
+class ListBaseField:
     def __init__(self, field=None):
         self._field = field
 
@@ -530,13 +585,13 @@ class ListField(Field):
         return ListFunc().handle(node)
 
 
-class DictField(Field):
+class ListField(ListBaseField, Field):
+    pass
+
+
+class DictBaseField:
     def __init__(self, field=None):
         self._field = field
-
-    def handle_Dict(self, node):
-        return dict((StringField().handle(key), (self._field or GenericField()).handle(value))
-                    for key, value in zip(node.keys, node.values))
 
     def handle_List(self, node):
         """
@@ -551,10 +606,18 @@ class DictField(Field):
         import axonius.pql
 
         # Rebuilding the original string
-        source = astor.to_source(node.elts[0], pretty_source=lambda s: ''.join(split_lines(s, 6000)))
+        source = astor.to_source(
+            node.elts[0], pretty_source=lambda s: ''.join(split_lines(s, 6000)))
 
         # Using pql to compile it to a dict, and returning it
         return axonius.pql.find(source)
+
+
+class DictField(DictBaseField, Field):
+
+    def handle_Dict(self, node):
+        return dict((StringField().handle(key), (self._field or GenericField()).handle(value))
+                    for key, value in zip(node.keys, node.values))
 
 
 class DateTimeField(AlgebricField):
